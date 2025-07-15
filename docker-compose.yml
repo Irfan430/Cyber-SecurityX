@@ -1,0 +1,136 @@
+version: '3.8'
+
+services:
+  # MongoDB Database
+  mongodb:
+    image: mongo:6.0
+    container_name: cybersec_mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+      - ./scripts/init-mongo.js:/docker-entrypoint-initdb.d/init-mongo.js:ro
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: admin123
+      MONGO_INITDB_DATABASE: cybersec_platform
+    networks:
+      - cybersec_network
+
+  # Redis Cache & Queue
+  redis:
+    image: redis:7-alpine
+    container_name: cybersec_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - cybersec_network
+
+  # Backend API Service
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: cybersec_backend
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+      - ./shared:/app/shared
+      - scan_results:/app/scan_results
+    environment:
+      - NODE_ENV=development
+      - PORT=3001
+      - MONGODB_URI=mongodb://admin:admin123@mongodb:27017/cybersec_platform?authSource=admin
+      - REDIS_URL=redis://redis:6379
+      - ML_SERVICE_URL=http://ml-service:8000
+      - FRONTEND_URL=http://localhost:3000
+    depends_on:
+      - mongodb
+      - redis
+    networks:
+      - cybersec_network
+
+  # ML/AI Service
+  ml-service:
+    build:
+      context: ./ml-service
+      dockerfile: Dockerfile
+    container_name: cybersec_ml_service
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./ml-service:/app
+      - ./shared:/app/shared
+      - ml_models:/app/models/saved
+    environment:
+      - PYTHONPATH=/app
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - redis
+    networks:
+      - cybersec_network
+
+  # Frontend React App
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: development
+    container_name: cybersec_frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - REACT_APP_API_URL=http://localhost:3001
+      - REACT_APP_WS_URL=http://localhost:3001
+      - REACT_APP_STRIPE_PUBLISHABLE_KEY=${STRIPE_PUBLISHABLE_KEY}
+      - CHOKIDAR_USEPOLLING=true
+    depends_on:
+      - backend
+    networks:
+      - cybersec_network
+
+  # Nginx Reverse Proxy (Production)
+  nginx:
+    image: nginx:alpine
+    container_name: cybersec_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - cybersec_network
+    profiles:
+      - production
+
+volumes:
+  mongodb_data:
+    driver: local
+  redis_data:
+    driver: local
+  scan_results:
+    driver: local
+  ml_models:
+    driver: local
+
+networks:
+  cybersec_network:
+    driver: bridge
